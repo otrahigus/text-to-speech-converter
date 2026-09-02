@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Streamlit
+.streamlit/secrets.toml
+# ^ Aktifkan baris di atas untuk MENCEGAH commit secrets.toml berisi API key asli.
+# File template di repo ini sengaja masih berisi placeholder (bukan key asli),
+# jadi baris ini sudah aman diaktifkan sejak awal — hapus/comment hanya jika
+# Anda sengaja ingin men-track versi template-nya di git.
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Misc
+*.log
+*.zip

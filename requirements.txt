@@ -1,0 +1,8 @@
+streamlit>=1.37.0
+openai>=1.40.0
+mutagen>=1.47.0
+
+# Opsional (untuk kompresi otomatis file besar).
+# Butuh ffmpeg terinstall di sistem (bukan hanya pip install).
+# Jika tidak dibutuhkan, boleh dihapus dari requirements.
+pydub>=0.25.1
