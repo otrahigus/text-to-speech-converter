@@ -1,18 +1,29 @@
 """
 ================================================================
- Dialogue TTS Studio — Percakapan 2 Orang -> 1 File Audio
- (Streamlit + OpenAI TTS API)
+ Dialogue TTS Studio (GRATIS) — Percakapan 2 Orang -> 1 File Audio
+ Menggunakan edge-tts (Microsoft Edge Text-to-Speech)
 ================================================================
-Fitur:
+Kenapa ganti dari OpenAI ke edge-tts?
+  - edge-tts memakai layanan suara Microsoft Edge yang bisa diakses
+    gratis lewat library Python `edge-tts`, TANPA API key dan
+    TANPA biaya per karakter (tidak ada tagihan seperti OpenAI API).
+  - Kualitas suaranya adalah voice neural (bukan robotic), dan
+    tersedia banyak pilihan voice/bahasa termasuk Bahasa Indonesia.
+  - Butuh koneksi internet saat generate (karena tetap memanggil
+    layanan online Microsoft), tapi tidak butuh akun/API key/billing.
+
+Fitur (sama seperti versi sebelumnya, hanya mesin TTS-nya yang beda):
   - Naskah percakapan 2 pembicara (format: "A: ..." / "B: ...")
-  - Voice berbeda untuk tiap pembicara (multi-voice)
-  - Setiap baris di-generate lalu digabung jadi satu file audio
+  - Voice berbeda untuk tiap pembicara (bisa filter per bahasa)
+  - Setiap baris digenerate lalu digabung jadi satu file audio
     dengan jeda singkat antar baris (pakai pydub)
   - Preview tiap baris (opsional) + preview gabungan sebelum download
   - Progress bar per baris saat proses generate
-  - Download hasil akhir (MP3), nama file: conversation_[timestamp].mp3
+  - Download hasil akhir (MP3): conversation_[timestamp].mp3
   - Riwayat percakapan yang sudah dibuat, bisa didownload ulang
-  - Error handling: naskah kosong, format baris salah, API key invalid, dst.
+
+Install:
+    pip install streamlit edge-tts pydub mutagen
 
 Jalankan:
     streamlit run app.py
@@ -25,10 +36,16 @@ Catatan deployment (Streamlit Cloud):
 
 import io
 import re
+import asyncio
 from datetime import datetime
 
 import streamlit as st
-from openai import OpenAI, AuthenticationError, APIError, APIConnectionError
+
+try:
+    import edge_tts
+    EDGE_TTS_AVAILABLE = True
+except ImportError:
+    EDGE_TTS_AVAILABLE = False
 
 try:
     from pydub import AudioSegment
@@ -36,17 +53,11 @@ try:
 except ImportError:
     PYDUB_AVAILABLE = False
 
-try:
-    from mutagen.mp3 import MP3
-    MUTAGEN_AVAILABLE = True
-except ImportError:
-    MUTAGEN_AVAILABLE = False
-
 
 # ================================================================
 # 1. KONFIGURASI HALAMAN & CSS
 # ================================================================
-st.set_page_config(page_title="Dialogue TTS Studio", page_icon="🗣️", layout="centered")
+st.set_page_config(page_title="Dialogue TTS Studio (Gratis)", page_icon="🗣️", layout="centered")
 
 st.markdown(
     """
@@ -78,6 +89,11 @@ st.markdown(
         border-radius: 999px; background: rgba(127, 90, 240, 0.12);
         color: #7F5AF0; font-weight: 600; font-size: 0.8rem;
     }
+    .free-badge {
+        display: inline-block; padding: 0.25rem 0.7rem; border-radius: 999px;
+        background: rgba(44, 182, 125, 0.15); color: #2CB67D; font-weight: 700;
+        font-size: 0.75rem; margin-bottom: 0.6rem;
+    }
     .line-a { border-left: 4px solid #7F5AF0; padding-left: 0.6rem; margin-bottom: 0.35rem; }
     .line-b { border-left: 4px solid #2CB67D; padding-left: 0.6rem; margin-bottom: 0.35rem; }
     @media (max-width: 640px) {
@@ -89,11 +105,16 @@ st.markdown(
 )
 
 st.markdown('<div class="tts-title">🗣️ Dialogue TTS Studio</div>', unsafe_allow_html=True)
+st.markdown('<span class="free-badge">✅ 100% Gratis — tanpa API key, tanpa billing (edge-tts)</span>', unsafe_allow_html=True)
 st.markdown(
     '<div class="tts-subtitle">Ubah naskah percakapan 2 orang menjadi satu file audio '
     'dengan voice berbeda untuk tiap pembicara.</div>',
     unsafe_allow_html=True,
 )
+
+if not EDGE_TTS_AVAILABLE:
+    st.error("⚠️ Library `edge-tts` tidak ditemukan. Install dengan: `pip install edge-tts`")
+    st.stop()
 
 if not PYDUB_AVAILABLE:
     st.error(
@@ -106,27 +127,71 @@ if not PYDUB_AVAILABLE:
 
 
 # ================================================================
-# 2. DATA VOICE
+# 2. DAFTAR VOICE (edge-tts) — kurasi + fallback offline
 # ================================================================
-VOICES = {
-    "alloy":   "Netral & seimbang",
-    "echo":    "Tenang & jernih",
-    "fable":   "Hangat, gaya bercerita",
-    "onyx":    "Dalam & tegas",
-    "nova":    "Ringan & energik",
-    "shimmer": "Lembut & ramah",
-    "coral":   "Ekspresif & hangat",
-    "sage":    "Kalem & meyakinkan",
-    "verse":   "Dinamis & ekspresif",
-    "ballad":  "Lembut & melodius",
-    "ash":     "Jelas & profesional",
+# Voice andalan yang stabil tersedia di edge-tts (per pengetahuan saat ini).
+# Daftar lengkap & terbaru sebaiknya diambil lewat fetch_all_voices() di bawah,
+# karena Microsoft bisa menambah/mengubah voice sewaktu-waktu.
+FALLBACK_VOICES = {
+    "id-ID-ArdiNeural":   "🇮🇩 Indonesia — Pria",
+    "id-ID-GadisNeural":  "🇮🇩 Indonesia — Wanita",
+    "en-US-GuyNeural":    "🇺🇸 English (US) — Pria",
+    "en-US-AriaNeural":   "🇺🇸 English (US) — Wanita",
+    "en-US-JennyNeural":  "🇺🇸 English (US) — Wanita",
+    "en-GB-RyanNeural":   "🇬🇧 English (UK) — Pria",
+    "en-GB-SoniaNeural":  "🇬🇧 English (UK) — Wanita",
+}
+
+LOCALE_FILTERS = {
+    "Semua": None,
+    "Indonesia (id-ID)": "id-ID",
+    "English - US (en-US)": "en-US",
+    "English - UK (en-GB)": "en-GB",
+    "English - AU (en-AU)": "en-AU",
+    "Japanese (ja-JP)": "ja-JP",
+    "Korean (ko-KR)": "ko-KR",
+    "Mandarin (zh-CN)": "zh-CN",
+    "Arabic (ar-SA)": "ar-SA",
+    "Spanish (es-ES)": "es-ES",
+    "French (fr-FR)": "fr-FR",
+    "German (de-DE)": "de-DE",
+    "Hindi (hi-IN)": "hi-IN",
 }
 
 DEFAULT_SCRIPT = """A: Halo, apa kabar hari ini?
 B: Baik banget! Kamu lagi ngapain?
-A: Lagi coba bikin aplikasi text-to-speech buat percakapan dua orang.
-B: Wah keren, jadi satu file audio langsung ya?
-A: Betul, tinggal generate terus bisa langsung didownload."""
+A: Lagi coba bikin aplikasi text-to-speech buat percakapan dua orang, versi gratis.
+B: Wah keren, jadi nggak perlu bayar API ya?
+A: Betul, pakai edge-tts jadi gratis tapi suaranya tetap natural."""
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_all_voices():
+    """
+    Ambil daftar lengkap voice dari edge-tts (butuh internet).
+    Return: dict {ShortName: "Locale — Gender"} atau None jika gagal.
+    Di-cache 1 jam supaya tidak fetch berulang-ulang.
+    """
+    try:
+        voices = asyncio.run(edge_tts.list_voices())
+        result = {}
+        for v in voices:
+            short_name = v["ShortName"]
+            locale = v["Locale"]
+            gender = v["Gender"]
+            result[short_name] = f"{locale} — {gender}"
+        return result
+    except Exception:
+        return None
+
+
+def get_voice_options(locale_filter: str | None, all_voices: dict | None):
+    """Kembalikan dict voice sesuai filter locale, fallback ke daftar statis kalau fetch gagal."""
+    source = all_voices if all_voices else FALLBACK_VOICES
+    if not locale_filter:
+        return source
+    filtered = {k: v for k, v in source.items() if k.lower().startswith(locale_filter.lower())}
+    return filtered if filtered else source
 
 
 # ================================================================
@@ -138,20 +203,8 @@ if "last_error" not in st.session_state:
     st.session_state.last_error = None
 
 
-def get_api_key() -> str:
-    key = st.secrets.get("OPENAI_API_KEY", "") if hasattr(st, "secrets") else ""
-    if not key:
-        key = st.session_state.get("manual_api_key", "")
-    return key
-
-
 def parse_script(script: str):
-    """
-    Parse naskah menjadi list of (speaker, text).
-    Format yang diterima per baris: 'A: teks...' atau 'B: teks...'
-    (case-insensitive, boleh pakai nama lain asal konsisten dengan 2 label).
-    Return: (lines, errors)
-    """
+    """Parse naskah menjadi list (speaker, text). Format: 'Label: teks' per baris."""
     lines = []
     errors = []
     pattern = re.compile(r"^\s*([A-Za-z0-9_]+)\s*:\s*(.+)$")
@@ -166,7 +219,6 @@ def parse_script(script: str):
         speaker, text = match.group(1).strip(), match.group(2).strip()
         lines.append((speaker, text))
 
-    # Validasi: hanya boleh maksimal 2 label pembicara berbeda
     speakers_found = sorted(set(s for s, _ in lines), key=lambda s: s.lower())
     if len(speakers_found) > 2:
         errors.append(
@@ -177,11 +229,20 @@ def parse_script(script: str):
     return lines, errors, speakers_found
 
 
-def call_tts_api(client: OpenAI, model: str, voice: str, text: str, speed: float) -> bytes:
-    response = client.audio.speech.create(
-        model=model, voice=voice, input=text, speed=speed, response_format="mp3",
-    )
-    return response.content
+async def _synthesize_async(text: str, voice: str, rate_pct: int) -> bytes:
+    """Generate audio (bytes MP3) dari satu baris teks memakai edge-tts."""
+    rate_str = f"{'+' if rate_pct >= 0 else ''}{rate_pct}%"
+    communicate = edge_tts.Communicate(text, voice, rate=rate_str)
+    audio_chunks = bytearray()
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            audio_chunks.extend(chunk["data"])
+    return bytes(audio_chunks)
+
+
+def synthesize(text: str, voice: str, rate_pct: int) -> bytes:
+    """Wrapper sinkron untuk dipanggil dari kode Streamlit biasa."""
+    return asyncio.run(_synthesize_async(text, voice, rate_pct))
 
 
 def build_filename() -> str:
@@ -190,38 +251,44 @@ def build_filename() -> str:
 
 
 # ================================================================
-# 4. SIDEBAR — KONFIGURASI VOICE PER PEMBICARA
+# 4. SIDEBAR — KONFIGURASI VOICE PER PEMBICARA (GRATIS, TANPA API KEY)
 # ================================================================
 with st.sidebar:
     st.header("⚙️ Konfigurasi")
+    st.success("Gratis — tidak perlu API key ✅")
 
-    secret_key = st.secrets.get("OPENAI_API_KEY", "") if hasattr(st, "secrets") else ""
-    if secret_key:
-        st.success("API Key ditemukan di st.secrets ✅")
-    else:
-        st.text_input(
-            "OpenAI API Key", type="password", key="manual_api_key",
-            help="Sebaiknya simpan di .streamlit/secrets.toml untuk deployment.",
-        )
+    with st.spinner("Memuat daftar voice..."):
+        all_voices = fetch_all_voices()
+    if all_voices is None:
+        st.warning("⚠️ Gagal mengambil daftar voice online. Memakai daftar cadangan (terbatas).")
 
-    model = st.selectbox("Model TTS", options=["gpt-4o-mini-tts", "tts-1", "tts-1-hd"], index=0)
-    speed = st.slider("Kecepatan Bicara", 0.5, 2.0, 1.0, 0.05)
+    rate_pct = st.slider("Kecepatan Bicara (rate %)", -50, 50, 0, 5,
+                          help="0% = normal. Negatif = lebih lambat, positif = lebih cepat.")
     gap_ms = st.slider("Jeda antar baris (ms)", 0, 1500, 350, 50)
 
     st.markdown("---")
-    st.subheader("🗣️ Voice per Pembicara")
+    st.subheader("🗣️ Voice Pembicara A")
+    locale_a = st.selectbox("Filter bahasa A", options=list(LOCALE_FILTERS.keys()),
+                             index=1, key="locale_a")
+    voices_a = get_voice_options(LOCALE_FILTERS[locale_a], all_voices)
     voice_a = st.selectbox(
-        "Voice untuk Pembicara A", options=list(VOICES.keys()),
-        format_func=lambda v: f"{v} — {VOICES[v]}", index=0,
+        "Voice A", options=list(voices_a.keys()),
+        format_func=lambda v: f"{v} — {voices_a[v]}", key="voice_a",
     )
+
+    st.subheader("🗣️ Voice Pembicara B")
+    locale_b = st.selectbox("Filter bahasa B", options=list(LOCALE_FILTERS.keys()),
+                             index=1, key="locale_b")
+    voices_b = get_voice_options(LOCALE_FILTERS[locale_b], all_voices)
+    default_b_index = 1 if len(voices_b) > 1 else 0
     voice_b = st.selectbox(
-        "Voice untuk Pembicara B", options=list(VOICES.keys()),
-        format_func=lambda v: f"{v} — {VOICES[v]}", index=4,
+        "Voice B", options=list(voices_b.keys()),
+        format_func=lambda v: f"{v} — {voices_b[v]}", index=default_b_index, key="voice_b",
     )
 
     st.caption(
-        "💡 Label pembicara di naskah (mis. 'A' dan 'B') akan dipetakan "
-        "berurutan ke voice di atas berdasarkan urutan kemunculan pertama."
+        "💡 Label pembicara di naskah (mis. 'A' dan 'B') dipetakan berurutan "
+        "ke Voice A dan Voice B berdasarkan urutan kemunculan pertama."
     )
 
 
@@ -255,13 +322,10 @@ generate_clicked = st.button("🎬 Generate Percakapan", use_container_width=Tru
 # 6. PROSES GENERATE
 # ================================================================
 if generate_clicked:
-    api_key = get_api_key()
     lines, errors, speakers_found = parse_script(script)
 
     if not script.strip():
         st.warning("⚠️ Naskah tidak boleh kosong.")
-    elif not api_key:
-        st.error("⚠️ OpenAI API Key belum diisi. Tambahkan di sidebar atau di st.secrets.")
     elif errors:
         st.error("⚠️ Perbaiki dulu naskah Anda:")
         for e in errors:
@@ -269,7 +333,6 @@ if generate_clicked:
     elif not lines:
         st.warning("⚠️ Tidak ada baris valid yang bisa diproses.")
     else:
-        # Petakan label pembicara -> voice, berdasarkan urutan kemunculan pertama
         voice_map = {}
         if len(speakers_found) >= 1:
             voice_map[speakers_found[0]] = voice_a
@@ -278,10 +341,9 @@ if generate_clicked:
 
         progress_bar = st.progress(0, text="Mempersiapkan...")
         try:
-            client = OpenAI(api_key=api_key)
             combined = AudioSegment.silent(duration=0)
             silence_gap = AudioSegment.silent(duration=gap_ms)
-            line_previews = []  # simpan bytes tiap baris (opsional, buat expander)
+            line_previews = []
 
             total = len(lines)
             for idx, (speaker, text) in enumerate(lines):
@@ -289,7 +351,14 @@ if generate_clicked:
                 progress_bar.progress(pct, text=f"Generate baris {idx + 1}/{total} ({speaker})...")
 
                 voice_for_line = voice_map.get(speaker, voice_a)
-                audio_bytes = call_tts_api(client, model, voice_for_line, text, speed)
+                audio_bytes = synthesize(text, voice_for_line, rate_pct)
+
+                if not audio_bytes:
+                    raise RuntimeError(
+                        f"Gagal generate baris {idx + 1} (tidak ada audio dikembalikan). "
+                        "Coba lagi atau periksa koneksi internet."
+                    )
+
                 line_previews.append({"speaker": speaker, "text": text, "bytes": audio_bytes})
 
                 segment = AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3")
@@ -321,25 +390,17 @@ if generate_clicked:
 
             progress_bar.progress(100, text="Selesai!")
             progress_bar.empty()
-            st.success(f"✅ Percakapan berhasil dibuat dari {total} baris!")
+            st.success(f"✅ Percakapan berhasil dibuat dari {total} baris — gratis, tanpa biaya API!")
             st.session_state.last_error = None
-
-        except AuthenticationError:
-            progress_bar.empty()
-            st.session_state.last_error = "auth"
-            st.error("❌ API Key tidak valid atau sudah kadaluarsa.")
-
-        except (APIError, APIConnectionError) as e:
-            progress_bar.empty()
-            st.session_state.last_error = "api"
-            st.error(f"❌ Gagal menghubungi OpenAI API: {e}")
 
         except Exception as e:
             progress_bar.empty()
             st.session_state.last_error = "general"
-            st.error(f"❌ Terjadi kesalahan saat generate audio: {e}")
-
-        if st.session_state.last_error:
+            st.error(
+                f"❌ Terjadi kesalahan saat generate audio: {e}\n\n"
+                "Penyebab umum: koneksi internet terputus, atau nama voice tidak valid "
+                "(coba pilih ulang voice di sidebar)."
+            )
             st.button("🔄 Coba Lagi", key="retry_btn")
 
 
@@ -415,6 +476,6 @@ if st.session_state.history:
 # ================================================================
 st.markdown("---")
 st.caption(
-    "Dibuat dengan Streamlit + OpenAI TTS API + pydub. "
+    "Dibuat dengan Streamlit + edge-tts (gratis, tanpa API key) + pydub. "
     "Setiap baris naskah digenerate terpisah lalu digabung jadi satu file audio."
 )
