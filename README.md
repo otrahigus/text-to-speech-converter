@@ -1,155 +1,163 @@
-# 🎙️ Multi-Voice TTS Studio
+# 🗣️ Dialogue TTS Studio (Gratis)
 
-Aplikasi Text-to-Speech (TTS) multi-voice berbasis **Streamlit** + **OpenAI TTS API**,
-dengan fitur download audio yang lengkap: preview, format pilihan, history, dan bulk-download (ZIP).
+Aplikasi web sederhana untuk mengubah **naskah percakapan 2 orang** menjadi **satu file audio**
+yang bisa didengarkan dan didownload — **100% economical**.
 
----
-
-## ✨ Fitur
-
-**Multi-voice**
-- 11 pilihan voice (alloy, echo, fable, onyx, nova, shimmer, coral, sage, verse, ballad, ash) lengkap dengan deskripsi singkat.
-- Preview sample suara sebelum generate teks penuh.
-
-**Download**
-- Format MP3 atau WAV.
-- Nama file otomatis: `tts_[timestamp]_[voice_name].mp3`
-- Preview audio (player) sebelum download.
-- Progress bar saat proses generate.
-- Download berulang kali tanpa perlu generate ulang (audio tersimpan di `session_state` selama sesi berjalan).
-- History semua audio yang pernah dibuat, masing-masing punya tombol download sendiri.
-- Download semua riwayat sekaligus sebagai **ZIP**.
-- Ukuran file ditampilkan setelah generate; durasi ditampilkan sebelum download.
-- Kompresi otomatis (opsional, butuh `pydub` + `ffmpeg`) jika file > 5 MB.
-
-**Lainnya**
-- Character counter (maks 4096 karakter, sesuai batas API).
-- Speed control (0.5x–2.0x).
-- Desain responsif untuk layar mobile.
-- Error handling: teks kosong, API key tidak valid, kegagalan koneksi, file terlalu besar — masing-masing dengan pesan jelas + tombol retry.
+> 🤖 **Dibuat dengan bantuan AI** — kode, struktur project, dan dokumentasi di repo ini
+> disusun dengan bantuan Claude (Anthropic) melalui percakapan iteratif, lalu disesuaikan
+> untuk kebutuhan proyek ini.
 
 ---
 
-## 📁 Struktur Project
+## 🤔 Aplikasi ini buat apa?
+
+Bayangkan kamu punya naskah dialog seperti ini:
 
 ```
-tts_app/
-├── app.py                     # Aplikasi utama
-├── requirements.txt           # Dependencies Python
-├── .streamlit/
-│   └── secrets.toml           # Template API key (JANGAN commit versi berisi key asli)
-├── README.md
-└── .gitignore
+A: Hi, how are you today?
+B: I'm doing great, thanks! How about you?
+A: Pretty good, just testing this new app.
+```
+
+Aplikasi ini akan **membaca setiap baris**, mengubahnya jadi suara dengan **voice yang
+berbeda untuk A dan B**, lalu **menggabungkan semuanya jadi satu file MP3** yang bisa
+kamu putar atau download — seperti percakapan asli antara dua orang.
+
+Cocok untuk: latihan listening bahasa Inggris, membuat konten podcast pendek, dubbing
+skrip dialog, prototipe voice-over, dan lain-lain.
+
+---
+
+## ✨ Fitur Utama
+
+| Fitur | Penjelasan |
+|---|---|
+| 🆓 **Ekonomis 100%** | Pakai [edge-tts](https://github.com/rany2/edge-tts) (layanan suara Microsoft Edge). Tidak perlu API key. |
+| 🗣️ **Multi-voice** | Voice A dan Voice B bisa dipilih terpisah, termasuk banyak pilihan Bahasa Inggris (US/UK/AU) dan Bahasa Indonesia. |
+| 🎧 **Preview sebelum download** | Dengarkan hasil gabungan, atau dengarkan tiap baris satu-satu. |
+| ⬇️ **Download mudah** | Tombol download MP3 dengan nama file otomatis: `conversation_[waktu].mp3`. |
+| 🕘 **Riwayat** | Semua percakapan yang sudah dibuat tersimpan selama sesi berjalan, bisa didownload ulang tanpa generate lagi. |
+| 📊 **Info file** | Durasi dan ukuran file ditampilkan sebelum kamu download. |
+| 🐢 **Atur kecepatan & jeda** | Bisa dipercepat/diperlambat, dan atur jeda hening antar baris supaya terdengar natural. |
+
+---
+
+## 🚀 Cara Pakai (Sudah Online / Sudah Deploy)
+
+1. Buka link aplikasi (misalnya `https://text-to-speech-converter-mec.streamlit.app`).
+2. Di **sidebar kiri**:
+   - Pilih **filter bahasa** untuk Voice A dan Voice B, misalnya **"English - US (en-US)"**
+     untuk percakapan Bahasa Inggris.
+   - Pilih voice yang diinginkan (ada tanda pria/wanita di label-nya).
+   - Atur kecepatan bicara & jeda antar baris kalau perlu (opsional, default sudah pas).
+3. Di kotak **"Naskah Percakapan"**, tulis dialog dengan format:
+   ```
+   A: teks untuk pembicara A
+   B: teks untuk pembicara B
+   ```
+   *(Hanya boleh 2 label pembicara berbeda dalam satu naskah, misal `A`/`B` atau nama tokoh.)*
+4. Buka bagian **"Preview parsing naskah"** untuk memastikan naskah terbaca dengan benar.
+5. Klik **🎬 Generate Percakapan**, tunggu progress bar sampai selesai.
+6. Dengarkan hasilnya di player, cek durasi & ukuran file, lalu klik **⬇️ Download Percakapan (MP3)**.
+7. Semua hasil generate sebelumnya bisa dilihat & didownload ulang di bagian **🕘 Riwayat Percakapan**.
+
+---
+
+## 💻 Cara Pakai di Komputer Sendiri (Lokal)
+
+### 1. Install Python
+Pastikan sudah punya Python 3.9 atau lebih baru.
+
+### 2. Install ffmpeg
+Aplikasi ini butuh **ffmpeg** untuk menggabungkan audio.
+
+- **Windows**: download dari https://ffmpeg.org/download.html, lalu tambahkan ke PATH.
+- **macOS**: `brew install ffmpeg`
+- **Ubuntu/Debian**: `sudo apt-get install ffmpeg`
+
+### 3. Install dependencies Python
+Di folder project, jalankan:
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Jalankan aplikasi
+```bash
+streamlit run app.py
+```
+Browser akan otomatis terbuka ke `http://localhost:8501`.
+
+---
+
+## ☁️ Cara Deploy ke Streamlit Community Cloud (Gratis)
+
+1. Push semua file project ini ke repository **GitHub**.
+2. Buka https://share.streamlit.io/ → **New app**.
+3. Pilih repository, branch, dan set **Main file path** ke `app.py`.
+4. Klik **Deploy** — tunggu beberapa menit sampai proses instalasi selesai.
+5. Selesai! Aplikasi bisa diakses lewat URL publik, dan **auto-update** setiap kali
+   kamu push perubahan baru ke GitHub.
+
+> ⚠️ **Penting:** file `packages.txt` (isinya `ffmpeg`) **wajib ada** di root repo,
+> supaya Streamlit Cloud otomatis meng-install ffmpeg. Tanpa ini, proses penggabungan
+> audio akan gagal.
+
+---
+
+## 📁 Struktur File
+
+```
+├── app.py              # Kode utama aplikasi
+├── requirements.txt    # Daftar library Python yang dibutuhkan
+├── packages.txt         # Dependency sistem (ffmpeg) untuk Streamlit Cloud
+└── README.md            # Dokumentasi ini
 ```
 
 ---
 
-## 🚀 Menjalankan Secara Lokal
+## 🛠️ Troubleshooting
 
-1. **Clone / salin folder project ini**, lalu masuk ke direktorinya:
-   ```bash
-   cd tts_app
-   ```
+**"Library edge-tts tidak ditemukan" saat dibuka**
+- Pastikan `requirements.txt` di repo GitHub sudah berisi baris `edge-tts>=6.1.0`.
+- Di dashboard Streamlit Cloud, buka menu **⋮ → Reboot app** supaya dependency
+  di-install ulang dari `requirements.txt` terbaru.
+- Kalau masih gagal, cek log deploy (menu ⋮ → Manage app → tab **Logs**) di bagian
+  "Installing dependencies" untuk melihat pesan error pastinya.
 
-2. **Buat virtual environment** (opsional tapi disarankan):
-   ```bash
-   python -m venv venv
-   source venv/bin/activate      # Windows: venv\Scripts\activate
-   ```
+**"Library pydub tidak ditemukan" atau audio gagal digabung**
+- Pastikan `packages.txt` berisi `ffmpeg` dan sudah ter-push ke GitHub.
+- Reboot app setelah menambahkan `packages.txt`.
 
-3. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
+**Generate lama / gagal di tengah jalan**
+- edge-tts butuh koneksi internet aktif (memanggil layanan online Microsoft).
+  Coba generate ulang, biasanya karena koneksi sempat putus.
 
-4. **Isi API Key** di `.streamlit/secrets.toml`:
-   ```toml
-   OPENAI_API_KEY = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxx"
-   ```
-   Dapatkan API key dari https://platform.openai.com/api-keys
-
-5. **Jalankan aplikasi**:
-   ```bash
-   streamlit run app.py
-   ```
-
-6. Buka browser ke `http://localhost:8501`.
-
-> Jika belum sempat mengisi `secrets.toml`, aplikasi juga menyediakan input API Key manual di sidebar (khusus untuk testing lokal, tidak disarankan untuk deployment publik).
+**Suara yang keluar bukan Bahasa Inggris**
+- Cek lagi filter bahasa di sidebar (Voice A / Voice B) sudah diset ke
+  **English - US / UK / AU**, bukan default Indonesia.
 
 ---
 
-## ☁️ Deploy ke Streamlit Community Cloud
+## ❓ FAQ Singkat
 
-1. Push project ini ke repository GitHub (public atau private).
-   - **Pastikan** `.streamlit/secrets.toml` yang berisi API key **asli** TIDAK ikut ter-push (lihat bagian `.gitignore` di bawah).
-2. Buka https://share.streamlit.io/ → **New app** → pilih repo dan branch Anda → `app.py` sebagai entry point.
-3. Di halaman **App settings → Secrets**, tempelkan isi berikut (ganti dengan key asli Anda):
-   ```toml
-   OPENAI_API_KEY = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxx"
-   ```
-4. Klik **Deploy**. Aplikasi akan otomatis punya URL publik (`https://<nama-app>.streamlit.app`).
-5. **Auto-deploy**: setiap kali Anda push perubahan ke branch yang di-deploy, Streamlit Cloud akan otomatis rebuild & redeploy aplikasi.
+**Q: Apakah benar-benar gratis selamanya?**
+A: Ya, selama edge-tts (layanan Microsoft Edge TTS) masih tersedia gratis untuk publik.
+Tidak ada API key atau billing yang perlu diisi.
 
----
+**Q: Bisa lebih dari 2 pembicara?**
+A: Versi ini dibatasi maksimal 2 label pembicara per naskah agar sederhana. Bisa
+dikembangkan lebih lanjut kalau dibutuhkan lebih banyak pembicara.
 
-## 🔍 Cara Kerja Fitur Download (Penjelasan Teknis)
-
-1. **Generate audio** — teks dikirim ke `client.audio.speech.create(...)`, dan `response.content`
-   berisi bytes mentah audio (MP3 atau WAV, tergantung `response_format`).
-2. **Simpan ke `st.session_state.history`** — ini kunci supaya download bisa dilakukan
-   berkali-kali tanpa generate ulang. Streamlit me-rerun seluruh script setiap ada
-   interaksi (termasuk klik tombol download), jadi tanpa `session_state`, audio yang
-   baru saja dibuat akan "hilang" dan API akan terpanggil ulang secara tidak sengaja.
-   Dengan menyimpan bytes-nya di memori sesi, `st.download_button` bisa dipanggil
-   berkali-kali dari data yang sama.
-3. **Nama file unik** — dibuat dari kombinasi timestamp (`%Y%m%d_%H%M%S`) dan nama voice,
-   sehingga setiap file punya nama berbeda meski voice sama.
-4. **Durasi audio** — dihitung dari bytes MP3 memakai `mutagen` (pure Python, tanpa
-   perlu ffmpeg) sebelum tombol download muncul, supaya pengguna tahu berapa lama
-   audio yang akan mereka download.
-5. **ZIP semua riwayat** — dibuat secara *in-memory* memakai `zipfile.ZipFile` +
-   `io.BytesIO`, tanpa menulis file sementara ke disk — penting untuk deployment
-   di Streamlit Cloud yang filesystem-nya bersifat sementara (*ephemeral*).
-6. **Kompresi otomatis** — hanya aktif jika file > 5 MB **dan** `pydub` + `ffmpeg`
-   tersedia di environment; jika tidak, aplikasi tetap berjalan dan hanya menampilkan
-   peringatan ukuran file.
+**Q: Bisa bahasa lain selain Inggris/Indonesia?**
+A: Bisa — edge-tts mendukung banyak bahasa (Jepang, Korea, Mandarin, Spanyol, dst).
+Pilih saja lewat filter bahasa di sidebar.
 
 ---
 
-## 💡 Tips Optimasi
+## 🙏 Kredit
 
-- **Batasi panjang teks per request** (idealnya < 2000 karakter) agar waktu generate
-  lebih cepat dan ukuran file tetap kecil — pecah teks panjang menjadi beberapa
-  bagian jika perlu.
-- **Gunakan format MP3** untuk ukuran file jauh lebih kecil dibanding WAV (WAV tidak
-  terkompresi, bisa 5–10x lebih besar untuk durasi yang sama).
-- **Model `tts-1`** lebih cepat & lebih murah untuk draft/testing; gunakan
-  `tts-1-hd` atau `gpt-4o-mini-tts` untuk hasil akhir yang lebih halus.
-- **Cache preview voice** (`st.session_state.voice_previews`) mencegah pemanggilan
-  API berulang untuk sample yang sama — hemat kuota & biaya.
-- Untuk trafik tinggi di production, pertimbangkan menambahkan **rate limiting**
-  sederhana (misalnya cooldown antar generate per user) agar biaya API terkendali.
-
----
-
-## ⚠️ Error Handling
-
-| Kondisi                          | Perilaku Aplikasi                                              |
-|-----------------------------------|------------------------------------------------------------------|
-| Teks kosong                       | Peringatan (`st.warning`), proses generate dibatalkan.          |
-| API key kosong                    | Pesan error jelas, meminta isi API key di sidebar / secrets.    |
-| API key tidak valid               | `AuthenticationError` ditangkap, pesan error spesifik.          |
-| Gagal koneksi / error API lain    | Pesan error + tombol **Coba Lagi**.                             |
-| File audio > 5 MB                 | Kompresi otomatis (jika `pydub`+ffmpeg ada) atau peringatan.    |
-
----
-
-## 📦 requirements.txt
-
-```
-streamlit>=1.37.0
-openai>=1.40.0
-mutagen>=1.47.0
-pydub>=0.25.1   # opsional, untuk kompresi otomatis (butuh ffmpeg di sistem)
-```
+- Mesin suara: [edge-tts](https://github.com/rany2/edge-tts) (open-source, memanfaatkan
+  layanan Microsoft Edge Read Aloud).
+- Framework aplikasi: [Streamlit](https://streamlit.io/).
+- Penggabungan audio: [pydub](https://github.com/jiaaro/pydub) + [ffmpeg](https://ffmpeg.org/).
+- Kode & dokumentasi disusun dengan bantuan **AI (Claude, Anthropic)**.
