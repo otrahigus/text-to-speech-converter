@@ -3,28 +3,34 @@
  Dialogue TTS Studio (GRATIS) — Percakapan 2 Orang -> 1 File Audio
 ================================================================
 Mesin suara (semua gratis, tanpa API key):
-  1. edge-tts  (utama)  : voice neural Microsoft Edge, banyak pilihan voice
-  2. gTTS      (cadangan): dipakai otomatis jika edge-tts gagal/ditolak
-                           (misalnya error 403 dari IP server cloud)
+  1. Kokoro  (LOKAL, default) : jalan di server aplikasi sendiri, tidak
+                                 bisa "ditolak" pihak luar. Punya voice
+                                 PRIA dan WANITA (Inggris US/UK).
+  2. edge-tts (online)        : voice Microsoft Edge. Sering ditolak
+                                 (403) dari IP server cloud, jadi hanya
+                                 opsional.
+  3. Auto                     : coba edge-tts dulu, kalau ditolak otomatis
+                                 pakai Kokoro.
 
-Perbaikan di versi ini:
-  - Retry 3x untuk edge-tts + fallback otomatis ke gTTS
-  - Kegagalan ambil daftar voice tidak lagi ter-cache
-  - Default Bahasa Inggris (naskah, filter en-US, voice Guy & Aria)
-  - Detail error ditampilkan agar mudah didiagnosis
-
-Jalankan lokal:   streamlit run app.py
-Deploy Cloud    : butuh packages.txt berisi "ffmpeg"
+Catatan:
+  - Pertama kali dipakai, Kokoro mengunduh file model (~115 MB) sekali.
+    Setelah itu tersimpan di cache server.
+  - Deploy Streamlit Cloud: packages.txt harus berisi "ffmpeg".
 ================================================================
 """
 
 import io
 import re
 import time
+import wave
 import asyncio
+import tempfile
 import traceback
+import urllib.request
+from pathlib import Path
 from datetime import datetime
 
+import numpy as np
 import streamlit as st
 
 try:
@@ -34,10 +40,10 @@ except ImportError:
     EDGE_TTS_AVAILABLE = False
 
 try:
-    from gtts import gTTS
-    GTTS_AVAILABLE = True
+    from kokoro_onnx import Kokoro
+    KOKORO_AVAILABLE = True
 except ImportError:
-    GTTS_AVAILABLE = False
+    KOKORO_AVAILABLE = False
 
 try:
     from pydub import AudioSegment
@@ -96,13 +102,9 @@ st.markdown('<div class="tts-title">🗣️ Dialogue TTS Studio</div>', unsafe_a
 st.markdown('<span class="free-badge">✅ 100% Gratis — tanpa API key, tanpa billing</span>', unsafe_allow_html=True)
 st.markdown(
     '<div class="tts-subtitle">Ubah naskah percakapan 2 orang menjadi satu file audio '
-    'dengan voice berbeda untuk tiap pembicara.</div>',
+    'dengan voice pria/wanita yang berbeda untuk tiap pembicara.</div>',
     unsafe_allow_html=True,
 )
-
-if not EDGE_TTS_AVAILABLE and not GTTS_AVAILABLE:
-    st.error("⚠️ Tidak ada mesin TTS terpasang. Install: `pip install edge-tts gTTS`")
-    st.stop()
 
 if not PYDUB_AVAILABLE:
     st.error(
@@ -111,74 +113,134 @@ if not PYDUB_AVAILABLE:
     )
     st.stop()
 
+if not KOKORO_AVAILABLE and not EDGE_TTS_AVAILABLE:
+    st.error("⚠️ Tidak ada mesin TTS terpasang. Install: `pip install kokoro-onnx edge-tts`")
+    st.stop()
+
 
 # ================================================================
-# 2. DAFTAR VOICE
+# 2. KOKORO (LOKAL) — unduh model, load, sintesis
 # ================================================================
-FALLBACK_VOICES = {
-    "en-US-GuyNeural":    "en-US — Male",
-    "en-US-AriaNeural":   "en-US — Female",
-    "en-US-JennyNeural":  "en-US — Female",
-    "en-GB-RyanNeural":   "en-GB — Male",
-    "en-GB-SoniaNeural":  "en-GB — Female",
+# File rilis resmi kokoro-onnx (tag model-files-v1.0). int8 = paling kecil (~88 MB).
+# Ganti ke "kokoro-v1.0.fp16.onnx" (~169 MB) atau "kokoro-v1.0.onnx" (~310 MB)
+# kalau ingin kualitas sedikit lebih tinggi dan server kuat.
+KOKORO_BASE_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
+KOKORO_MODEL_FILE = "kokoro-v1.0.int8.onnx"
+KOKORO_VOICES_FILE = "voices-v1.0.bin"
+
+# Voice Inggris pilihan (nama sesuai daftar voice Kokoro).
+KOKORO_VOICES = {
+    "am_michael": "🇺🇸 Pria — Michael",
+    "am_adam":    "🇺🇸 Pria — Adam",
+    "am_eric":    "🇺🇸 Pria — Eric",
+    "am_liam":    "🇺🇸 Pria — Liam",
+    "am_onyx":    "🇺🇸 Pria — Onyx",
+    "bm_george":  "🇬🇧 Pria — George",
+    "bm_lewis":   "🇬🇧 Pria — Lewis",
+    "af_heart":   "🇺🇸 Wanita — Heart",
+    "af_bella":   "🇺🇸 Wanita — Bella",
+    "af_nicole":  "🇺🇸 Wanita — Nicole",
+    "af_sarah":   "🇺🇸 Wanita — Sarah",
+    "af_sky":     "🇺🇸 Wanita — Sky",
+    "bf_emma":    "🇬🇧 Wanita — Emma",
+    "bf_isabella": "🇬🇧 Wanita — Isabella",
+}
+
+
+def kokoro_lang(voice: str) -> str:
+    """Prefix 'b' = British English, selain itu American English."""
+    return "en-gb" if voice.startswith("b") else "en-us"
+
+
+def _download(url: str, dest: Path):
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    with urllib.request.urlopen(url, timeout=120) as resp, open(tmp, "wb") as f:
+        while True:
+            chunk = resp.read(1024 * 1024)
+            if not chunk:
+                break
+            f.write(chunk)
+    tmp.replace(dest)
+
+
+@st.cache_resource(show_spinner=False)
+def load_kokoro():
+    """Unduh model sekali (jika belum ada) lalu load. Di-cache selama server hidup."""
+    model_dir = Path(tempfile.gettempdir()) / "kokoro_models"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    model_path = model_dir / KOKORO_MODEL_FILE
+    voices_path = model_dir / KOKORO_VOICES_FILE
+
+    if not model_path.exists():
+        _download(f"{KOKORO_BASE_URL}/{KOKORO_MODEL_FILE}", model_path)
+    if not voices_path.exists():
+        _download(f"{KOKORO_BASE_URL}/{KOKORO_VOICES_FILE}", voices_path)
+
+    return Kokoro(str(model_path), str(voices_path))
+
+
+def samples_to_wav_bytes(samples, sample_rate: int) -> bytes:
+    """Ubah array float (-1..1) dari Kokoro menjadi bytes WAV 16-bit mono."""
+    arr = np.asarray(samples, dtype=np.float32).reshape(-1)
+    pcm = (np.clip(arr, -1.0, 1.0) * 32767).astype(np.int16)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(int(sample_rate))
+        w.writeframes(pcm.tobytes())
+    return buf.getvalue()
+
+
+def synth_kokoro(text: str, voice: str, rate_pct: int):
+    kokoro = load_kokoro()
+    speed = max(0.5, min(2.0, 1.0 + rate_pct / 100.0))
+    samples, sample_rate = kokoro.create(text, voice=voice, speed=speed, lang=kokoro_lang(voice))
+    return samples_to_wav_bytes(samples, sample_rate), "wav"
+
+
+# ================================================================
+# 3. EDGE-TTS (ONLINE, OPSIONAL)
+# ================================================================
+FALLBACK_EDGE_VOICES = {
+    "en-US-GuyNeural":     "en-US — Male",
+    "en-US-AriaNeural":    "en-US — Female",
+    "en-US-JennyNeural":   "en-US — Female",
+    "en-GB-RyanNeural":    "en-GB — Male",
+    "en-GB-SoniaNeural":   "en-GB — Female",
     "en-AU-WilliamNeural": "en-AU — Male",
     "en-AU-NatashaNeural": "en-AU — Female",
-    "id-ID-ArdiNeural":   "id-ID — Male",
-    "id-ID-GadisNeural":  "id-ID — Female",
 }
 
-LOCALE_FILTERS = {
-    "English - US (en-US)": "en-US",
-    "English - UK (en-GB)": "en-GB",
-    "English - AU (en-AU)": "en-AU",
-    "Indonesia (id-ID)": "id-ID",
-    "Semua bahasa": None,
-}
+
+async def _edge_async(text, voice, rate_pct):
+    rate_str = f"{'+' if rate_pct >= 0 else ''}{rate_pct}%"
+    communicate = edge_tts.Communicate(text, voice, rate=rate_str)
+    buf = bytearray()
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            buf.extend(chunk["data"])
+    return bytes(buf)
+
+
+def synth_edge(text, voice, rate_pct, timeout=25):
+    data = asyncio.run(asyncio.wait_for(_edge_async(text, voice, rate_pct), timeout))
+    if not data:
+        raise RuntimeError("edge-tts mengembalikan audio kosong")
+    return data, "mp3"
+
+
+# ================================================================
+# 4. STATE & HELPER
+# ================================================================
+if "history" not in st.session_state:
+    st.session_state.history = []
 
 DEFAULT_SCRIPT = """A: Hi, how are you today?
 B: I'm doing great, thanks! How about you?
 A: Pretty good. I'm testing a text-to-speech app for two-person conversations.
 B: That sounds useful. Does it create a single audio file?
 A: Yes, and you can download it right after it's generated."""
-
-# Aksen gTTS untuk fallback: pembicara A = US, pembicara B = UK
-GTTS_ACCENTS = ["com", "co.uk"]
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _fetch_voices_raw():
-    """Exception TIDAK di-cache oleh Streamlit, jadi kegagalan akan dicoba lagi."""
-    voices = asyncio.run(edge_tts.list_voices())
-    return {v["ShortName"]: f'{v["Locale"]} — {v["Gender"]}' for v in voices}
-
-
-def fetch_all_voices():
-    if not EDGE_TTS_AVAILABLE:
-        return None
-    try:
-        return _fetch_voices_raw()
-    except Exception:
-        return None
-
-
-def get_voice_options(locale_filter, all_voices):
-    source = all_voices if all_voices else FALLBACK_VOICES
-    if not locale_filter:
-        return source
-    filtered = {k: v for k, v in source.items() if k.lower().startswith(locale_filter.lower())}
-    return filtered if filtered else source
-
-
-def pick_index(options, preferred, fallback_index=0):
-    keys = list(options.keys())
-    return keys.index(preferred) if preferred in keys else min(fallback_index, len(keys) - 1)
-
-
-# ================================================================
-# 3. STATE & HELPER
-# ================================================================
-if "history" not in st.session_state:
-    st.session_state.history = []
 
 
 def parse_script(script: str):
@@ -204,100 +266,71 @@ def parse_script(script: str):
     return lines, errors, speakers_found
 
 
-async def _edge_async(text, voice, rate_pct):
-    rate_str = f"{'+' if rate_pct >= 0 else ''}{rate_pct}%"
-    communicate = edge_tts.Communicate(text, voice, rate=rate_str)
-    buf = bytearray()
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            buf.extend(chunk["data"])
-    return bytes(buf)
-
-
-def synth_edge(text, voice, rate_pct):
-    return asyncio.run(_edge_async(text, voice, rate_pct))
-
-
-def synth_gtts(text, speaker_index, lang="en"):
-    buf = io.BytesIO()
-    tld = GTTS_ACCENTS[speaker_index % len(GTTS_ACCENTS)]
-    gTTS(text=text, lang=lang, tld=tld).write_to_fp(buf)
-    return buf.getvalue()
-
-
-def synthesize_line(text, voice, rate_pct, speaker_index, gtts_lang):
-    """
-    Coba edge-tts sampai 3x. Jika tetap gagal, pakai gTTS.
-    Return: (audio_bytes, engine_name, error_text_or_None)
-    """
-    last_err = None
-    if EDGE_TTS_AVAILABLE:
-        for attempt in range(3):
-            try:
-                data = synth_edge(text, voice, rate_pct)
-                if data:
-                    return data, "edge-tts", None
-                last_err = "edge-tts mengembalikan audio kosong"
-            except Exception as e:
-                last_err = f"{type(e).__name__}: {e}"
-            time.sleep(1.0 * (attempt + 1))
-
-    if GTTS_AVAILABLE:
-        try:
-            return synth_gtts(text, speaker_index, gtts_lang), "gTTS", last_err
-        except Exception as e:
-            last_err = f"{last_err or ''} | gTTS: {type(e).__name__}: {e}"
-
-    raise RuntimeError(last_err or "Semua mesin TTS gagal.")
-
-
 def build_filename():
     return f"conversation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3"
 
 
+def pick_index(options, preferred, fallback_index=0):
+    keys = list(options.keys())
+    return keys.index(preferred) if preferred in keys else min(fallback_index, len(keys) - 1)
+
+
 # ================================================================
-# 4. SIDEBAR
+# 5. SIDEBAR
 # ================================================================
+ENGINE_OPTIONS = []
+if KOKORO_AVAILABLE:
+    ENGINE_OPTIONS.append("Kokoro (lokal, paling stabil)")
+if EDGE_TTS_AVAILABLE:
+    ENGINE_OPTIONS.append("edge-tts (online)")
+if KOKORO_AVAILABLE and EDGE_TTS_AVAILABLE:
+    ENGINE_OPTIONS.append("Auto (edge-tts, jika ditolak → Kokoro)")
+
 with st.sidebar:
     st.header("⚙️ Konfigurasi")
     st.success("Gratis — tidak perlu API key ✅")
 
-    all_voices = fetch_all_voices()
-    if all_voices is None:
-        st.warning("⚠️ Daftar voice online tidak bisa diambil. Memakai daftar cadangan.")
+    engine_choice = st.radio("Mesin suara", ENGINE_OPTIONS, index=0)
+    use_kokoro_voices = engine_choice.startswith(("Kokoro", "Auto"))
+    use_edge_voices = engine_choice.startswith(("edge", "Auto"))
 
-    rate_pct = st.slider("Kecepatan Bicara (rate %)", -50, 50, 0, 5,
-                         help="0% = normal. Hanya berlaku untuk edge-tts.")
+    rate_pct = st.slider("Kecepatan Bicara (%)", -50, 50, 0, 5, help="0% = normal.")
     gap_ms = st.slider("Jeda antar baris (ms)", 0, 1500, 350, 50)
 
     st.markdown("---")
-    st.subheader("🗣️ Voice Pembicara A")
-    locale_a = st.selectbox("Filter bahasa A", list(LOCALE_FILTERS.keys()), index=0, key="locale_a")
-    voices_a = get_voice_options(LOCALE_FILTERS[locale_a], all_voices)
-    voice_a = st.selectbox(
-        "Voice A", list(voices_a.keys()),
-        index=pick_index(voices_a, "en-US-GuyNeural"),
-        format_func=lambda v: f"{v} — {voices_a[v]}", key="voice_a",
-    )
+    kokoro_voice_a, kokoro_voice_b = "am_michael", "af_heart"
+    if use_kokoro_voices:
+        st.subheader("🗣️ Voice Kokoro")
+        kokoro_voice_a = st.selectbox(
+            "Pembicara A", list(KOKORO_VOICES.keys()),
+            index=pick_index(KOKORO_VOICES, "am_michael"),
+            format_func=lambda v: f"{KOKORO_VOICES[v]} ({v})", key="kv_a",
+        )
+        kokoro_voice_b = st.selectbox(
+            "Pembicara B", list(KOKORO_VOICES.keys()),
+            index=pick_index(KOKORO_VOICES, "af_heart"),
+            format_func=lambda v: f"{KOKORO_VOICES[v]} ({v})", key="kv_b",
+        )
 
-    st.subheader("🗣️ Voice Pembicara B")
-    locale_b = st.selectbox("Filter bahasa B", list(LOCALE_FILTERS.keys()), index=0, key="locale_b")
-    voices_b = get_voice_options(LOCALE_FILTERS[locale_b], all_voices)
-    voice_b = st.selectbox(
-        "Voice B", list(voices_b.keys()),
-        index=pick_index(voices_b, "en-US-AriaNeural", 1),
-        format_func=lambda v: f"{v} — {voices_b[v]}", key="voice_b",
-    )
+    edge_voice_a, edge_voice_b = "en-US-GuyNeural", "en-US-AriaNeural"
+    if use_edge_voices:
+        st.subheader("🗣️ Voice edge-tts")
+        edge_voice_a = st.selectbox(
+            "Pembicara A", list(FALLBACK_EDGE_VOICES.keys()),
+            index=pick_index(FALLBACK_EDGE_VOICES, "en-US-GuyNeural"),
+            format_func=lambda v: f"{v} — {FALLBACK_EDGE_VOICES[v]}", key="ev_a",
+        )
+        edge_voice_b = st.selectbox(
+            "Pembicara B", list(FALLBACK_EDGE_VOICES.keys()),
+            index=pick_index(FALLBACK_EDGE_VOICES, "en-US-AriaNeural", 1),
+            format_func=lambda v: f"{v} — {FALLBACK_EDGE_VOICES[v]}", key="ev_b",
+        )
 
-    gtts_lang = st.selectbox(
-        "Bahasa cadangan (gTTS)", ["en", "id"], index=0,
-        help="Dipakai hanya jika edge-tts gagal.",
-    )
-    st.caption("Label pembicara pertama di naskah memakai Voice A, label kedua memakai Voice B.")
+    st.caption("Label pembicara pertama di naskah memakai voice A, label kedua memakai voice B.")
 
 
 # ================================================================
-# 5. INPUT NASKAH
+# 6. INPUT NASKAH
 # ================================================================
 st.subheader("📝 Naskah Percakapan")
 st.caption("Format per baris: `Label: teks`. Maksimal 2 label berbeda (mis. `A` dan `B`).")
@@ -317,8 +350,25 @@ generate_clicked = st.button("🎬 Generate Percakapan", use_container_width=Tru
 
 
 # ================================================================
-# 6. GENERATE
+# 7. GENERATE
 # ================================================================
+def decide_engine(first_text: str):
+    """
+    Tentukan mesin yang dipakai untuk SELURUH percakapan (supaya suara konsisten).
+    Return: (engine_name, note_or_None)
+    """
+    if engine_choice.startswith("Kokoro"):
+        return "kokoro", None
+    if engine_choice.startswith("edge"):
+        return "edge", None
+    # Auto: tes edge-tts dengan baris pertama
+    try:
+        synth_edge(first_text, edge_voice_a, rate_pct, timeout=20)
+        return "edge", None
+    except Exception as e:
+        return "kokoro", f"edge-tts ditolak/gagal ({type(e).__name__}: {e}) — memakai Kokoro."
+
+
 if generate_clicked:
     lines, errors, speakers_found = parse_script(script)
 
@@ -331,35 +381,47 @@ if generate_clicked:
     elif not lines:
         st.warning("⚠️ Tidak ada baris valid yang bisa diproses.")
     else:
-        voice_map = {}
-        if len(speakers_found) >= 1:
-            voice_map[speakers_found[0]] = voice_a
-        if len(speakers_found) >= 2:
-            voice_map[speakers_found[1]] = voice_b
-
         progress_bar = st.progress(0, text="Mempersiapkan...")
         try:
+            engine, note = decide_engine(lines[0][1])
+
+            if engine == "kokoro":
+                if not KOKORO_AVAILABLE:
+                    raise RuntimeError("Library kokoro-onnx belum terpasang (cek requirements.txt).")
+                progress_bar.progress(3, text="Memuat model Kokoro (unduhan ~115 MB hanya sekali)...")
+                load_kokoro()
+                voices = {0: kokoro_voice_a, 1: kokoro_voice_b}
+            else:
+                voices = {0: edge_voice_a, 1: edge_voice_b}
+
             combined = AudioSegment.silent(duration=0)
             silence_gap = AudioSegment.silent(duration=gap_ms)
             line_previews = []
-            engines_used = set()
-            edge_errors = []
 
             total = len(lines)
             for idx, (speaker, text) in enumerate(lines):
-                progress_bar.progress(int(idx / total * 90),
-                                      text=f"Generate baris {idx + 1}/{total} ({speaker})...")
-
-                spk_index = speakers_found.index(speaker)
-                data, engine, err = synthesize_line(
-                    text, voice_map.get(speaker, voice_a), rate_pct, spk_index, gtts_lang
+                progress_bar.progress(
+                    5 + int(idx / total * 85),
+                    text=f"Generate baris {idx + 1}/{total} ({speaker})...",
                 )
-                engines_used.add(engine)
-                if err and engine != "edge-tts":
-                    edge_errors.append(err)
+                voice = voices[speakers_found.index(speaker)]
 
-                line_previews.append({"speaker": speaker, "text": text, "bytes": data})
-                combined += AudioSegment.from_file(io.BytesIO(data), format="mp3")
+                if engine == "kokoro":
+                    data, fmt = synth_kokoro(text, voice, rate_pct)
+                else:
+                    last_err = None
+                    for attempt in range(3):
+                        try:
+                            data, fmt = synth_edge(text, voice, rate_pct)
+                            break
+                        except Exception as e:
+                            last_err = e
+                            time.sleep(attempt + 1)
+                    else:
+                        raise RuntimeError(f"edge-tts gagal pada baris {idx + 1}: {last_err}")
+
+                line_previews.append({"speaker": speaker, "text": text, "bytes": data, "fmt": fmt})
+                combined += AudioSegment.from_file(io.BytesIO(data), format=fmt)
                 if idx < total - 1:
                     combined += silence_gap
 
@@ -376,33 +438,30 @@ if generate_clicked:
                 "duration_sec": len(combined) / 1000.0,
                 "num_lines": total,
                 "speakers": speakers_found,
-                "engines": sorted(engines_used),
+                "engine": "Kokoro (lokal)" if engine == "kokoro" else "edge-tts",
+                "voices": [voices[i] for i in range(len(speakers_found))],
                 "line_previews": line_previews,
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             })
 
             progress_bar.empty()
             st.success(f"✅ Percakapan berhasil dibuat dari {total} baris!")
-            if "gTTS" in engines_used:
-                st.warning(
-                    "ℹ️ edge-tts gagal/ditolak, sebagian atau seluruh audio memakai mesin cadangan gTTS "
-                    "(voice lebih sederhana; Pembicara A aksen US, B aksen UK)."
-                )
-                with st.expander("Detail error edge-tts"):
-                    st.code(edge_errors[0] if edge_errors else "-")
+            if note:
+                st.info(f"ℹ️ {note}")
 
         except Exception as e:
             progress_bar.empty()
             st.error(
                 f"❌ Gagal generate audio: {e}\n\n"
-                "Cek koneksi internet, pilih ulang voice, lalu klik Generate lagi."
+                "Jika memakai Kokoro untuk pertama kali, pastikan server bisa mengunduh file dari GitHub, "
+                "lalu klik Generate lagi."
             )
             with st.expander("Detail teknis (untuk debugging)"):
                 st.code(traceback.format_exc())
 
 
 # ================================================================
-# 7. PREVIEW & DOWNLOAD TERBARU
+# 8. PREVIEW & DOWNLOAD TERBARU
 # ================================================================
 if st.session_state.history:
     latest = st.session_state.history[0]
@@ -415,7 +474,8 @@ if st.session_state.history:
     st.markdown(
         f'<span class="meta-pill">⏱️ Durasi: {m}:{s:02d}</span>'
         f'<span class="meta-pill">💬 {latest["num_lines"]} baris</span>'
-        f'<span class="meta-pill">🎙️ Mesin: {", ".join(latest["engines"])}</span>',
+        f'<span class="meta-pill">🎙️ {latest["engine"]}</span>'
+        f'<span class="meta-pill">🗣️ {" + ".join(latest["voices"])}</span>',
         unsafe_allow_html=True,
     )
     st.info(f"✅ Ukuran file: **{latest['size_kb']:.1f} KB**  |  Nama file: `{latest['filename']}`")
@@ -428,11 +488,11 @@ if st.session_state.history:
     with st.expander("🔍 Dengarkan per baris (opsional)"):
         for line in latest["line_previews"]:
             st.caption(f"**{line['speaker']}:** {line['text']}")
-            st.audio(line["bytes"], format="audio/mp3")
+            st.audio(line["bytes"], format=f"audio/{'wav' if line['fmt'] == 'wav' else 'mp3'}")
 
 
 # ================================================================
-# 8. RIWAYAT
+# 9. RIWAYAT
 # ================================================================
 if st.session_state.history:
     st.markdown("---")
@@ -458,4 +518,4 @@ if st.session_state.history:
         st.rerun()
 
 st.markdown("---")
-st.caption("Dibuat dengan Streamlit + edge-tts (cadangan: gTTS) + pydub. AI-assisted.")
+st.caption("Dibuat dengan Streamlit + Kokoro (lokal) / edge-tts + pydub. AI-assisted.")
